@@ -15,4 +15,8 @@
  * limitations under the License.
  */
 
-require('playwright/lib/cli/client/program');
+const { program } = require('playwright/lib/cli/client/program');
+program().catch((e) => {
+  console.error(e.message);
+  process.exit(1);
+});

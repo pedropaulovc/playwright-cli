@@ -1,0 +1,123 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: 'Force publish even if no rebase occurred'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  sync-branches:
+    runs-on: ubuntu-latest
+    outputs:
+      rebased: ${{ steps.rebase-fork-main.outputs.rebased }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/microsoft/playwright-cli.git
+          git fetch upstream main
+          git fetch origin feat/fix-program-parse fork/main
+
+      - name: Rebase feat/fix-program-parse
+        id: rebase-fix
+        run: |
+          git checkout feat/fix-program-parse
+
+          if git merge-base --is-ancestor upstream/main feat/fix-program-parse; then
+            echo "feat/fix-program-parse is already up to date"
+          else
+            git rebase upstream/main
+            git push origin feat/fix-program-parse --force-with-lease
+            echo "Rebased feat/fix-program-parse on upstream/main"
+          fi
+        continue-on-error: true
+
+      - name: Rebase fork/main
+        id: rebase-fork-main
+        run: |
+          git fetch origin feat/fix-program-parse
+          git checkout fork/main
+
+          if git merge-base --is-ancestor origin/feat/fix-program-parse fork/main; then
+            echo "fork/main is already up to date"
+            echo "rebased=false" >> $GITHUB_OUTPUT
+          else
+            git rebase origin/feat/fix-program-parse
+            git push origin fork/main --force-with-lease
+            echo "Rebased fork/main on feat/fix-program-parse"
+            echo "rebased=true" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+
+      - name: Report rebase failures
+        if: steps.rebase-fix.outcome == 'failure' || steps.rebase-fork-main.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Upstream sync failed - manual rebase required" \
+            --body "$(cat <<'EOF'
+          The automatic rebase from upstream/main failed due to conflicts.
+
+          Please manually rebase the following branches:
+          - feat/fix-program-parse
+          - fork/main
+
+          Run:
+          ```bash
+          git fetch upstream main
+          git checkout feat/fix-program-parse
+          git rebase upstream/main
+          # resolve conflicts
+          git push origin feat/fix-program-parse --force-with-lease
+
+          git checkout fork/main
+          git rebase feat/fix-program-parse
+          # resolve conflicts
+          git push origin fork/main --force-with-lease
+          ```
+          EOF
+          )" \
+            --assignee pedropaulovc
+
+  publish:
+    needs: sync-branches
+    if: needs.sync-branches.outputs.rebased == 'true' || inputs.force_publish
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout fork/main
+        uses: actions/checkout@v4
+        with:
+          ref: fork/main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Publish
+        run: npm publish --provenance --access public
